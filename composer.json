@@ -1,0 +1,29 @@
+{
+    "name": "simbiat/bicdbf",
+    "type": "library",
+    "keywords": ["bic","php","bank","russia"],
+    "description": "Library to download BIC library in DBF format from Central Bank of Russia website (obsolete)",
+    "homepage": "https://github.com/Simbiat/bicdbf",
+    "license": "AGPL-3.0-or-later",
+    "authors": [
+        {
+            "name": "Dmitry Kustov",
+            "email": "simbiat@outlook.com",
+            "homepage": "https://simbiat.ru",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^7.4",
+        "ext-dbase": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "bicDBF\\": "src/"
+        }
+    },
+	"support": {
+		"issues": "https://github.com/Simbiat/bicdbf/issues",
+		"source": "https://github.com/Simbiat/bicdbf"
+	}
+}
