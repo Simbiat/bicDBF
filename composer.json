@@ -15,7 +15,10 @@
     ],
     "require": {
         "php": "^7.4",
-        "ext-dbase": "*"
+        "ext-dbase": "*",
+        "ext-zip": "*",
+        "simbiat/database": "^1.3.1+20210123",
+        "simbiat/arrayhelpers": "^1.0.3+20201227"
     },
     "autoload": {
         "psr-4": {
