@@ -19,6 +19,98 @@ class bicDBF
         $this->dbprefix = $dbprefix;
     }
     
+    #Function to prepare data based on URI. Not required generally, this is custom logic for https://simbiat.ru/bic only
+    public function uriParse(array $uri): array
+    {
+        #Check if URI is empty
+        if (empty($uri)) {
+            (new \Simbiat\http20\Headers)->redirect('https://'.$_SERVER['HTTP_HOST'].($_SERVER['SERVER_PORT'] !== 443 ? ':'.$_SERVER['SERVER_PORT'] : '').'/bictracker/search', true, true, false);
+        }
+        $uri[0] = strtolower($uri[0]);
+        #Gracefully handle legacy links
+        if ($uri[0] !== 'search' && mb_strlen(rawurldecode($uri[0])) === 8) {
+            #Assume legacy '/bic/vkey' link type was used and redirect to proper link
+            (new \Simbiat\http20\Headers)->redirect('https://'.$_SERVER['HTTP_HOST'].($_SERVER['SERVER_PORT'] !== 443 ? ':'.$_SERVER['SERVER_PORT'] : '').'/bictracker/bic/'.$uri[0], true, true, false);
+        }
+        #Prepare array
+        $outputArray = [
+            'service_name' => 'bictracker',
+            'h1' => 'BIC Tracker',
+            'title' => 'BIC Tracker',
+            'ogdesc' => 'Representation of Bank Identification Codes from Central Bank of Russia',
+        ];
+        #Start breadcrumbs
+        $breadarray = [
+            ['href'=>'/', 'name'=>'Home page'],
+        ];
+        switch ($uri[0]) {
+            #Process search page
+            case 'search':
+                $outputArray['subservice'] = $uri[0];
+                $outputArray['maxresults'] = 50;
+                #Continue breadcrumbs
+                $breadarray[] = ['href'=>'/bictracker/search', 'name'=>'Search'];
+                #Set search value
+                if (!isset($uri[1])) {
+                    $uri[1] = '';
+                }
+                #Sanitize search value
+                $decodedSearch = preg_replace('/[^\P{Cyrillic}a-zA-Z0-9!@#\$%&\*\(\)\-\+=|\?<>]/', '', rawurldecode($uri[1]));
+                #Check if search value was provided
+                if (empty($uri[1])) {
+                    #Get statistics
+                    $outputArray = array_merge($outputArray, $this->Statistics());
+                } else {
+                    #Continue breadcrumbs
+                    $breadarray[] = ['href'=>'/bictracker/search/'.$uri[1], 'name'=>'Search for '.$decodedSearch];
+                    #Get search results
+                    $outputArray['searchresult'] = $this->Search($uri[1]);
+                }
+                break;
+            case 'bic':
+                $outputArray['subservice'] = $uri[0];
+                if (empty($uri[1])) {
+                    $outputArray['http_error'] = 404;
+                } else {
+                    #Sanitize vkey
+                    $vkey = preg_replace('/[^a-zA-Z0-9!@#\$%&\*\(\)\-\+=|\?<>]/', '', rawurldecode($uri[1]));
+                    #Try to get details
+                    $outputArray['bicdetails'] = $this->getCurrent($vkey);
+                    #Check if key was found
+                    if (empty($outputArray['bicdetails'])) {
+                        $outputArray['http_error'] = 404;
+                    } else {
+                        #Try to exit early based on modification date
+                        $headers = (new \Simbiat\http20\Headers);
+                        $headers->lastModified($outputArray['bicdetails']['DT_IZM'], true);
+                        #Continue breadcrumbs
+                        $breadarray[] = ['href' => '/bictracker/bic/'.$uri[1], 'name' => $outputArray['bicdetails']['NAMEP']];
+                        #Set cache due to query complexity
+                        $outputArray['cache_age'] = 259200;
+                        #Update meta
+                        $outputArray['title'] = $outputArray['bicdetails']['NAMEP'];
+                        $outputArray['h1'] = $outputArray['bicdetails']['NAMEP'];
+                        $outputArray['ogdesc'] = $outputArray['bicdetails']['NAMEP'].' ('.$outputArray['bicdetails']['NEWNUM'].') in BIC Tracker';
+                        #Link header/tag for API
+                        $altlink = [['rel' => 'alternate', 'type' => 'application/json', 'title' => 'JSON representation', 'href' => '/api/bic/'.rawurlencode($vkey)]];
+                        #Send HTTP header
+                        $headers->links($altlink);
+                        #Add link to HTML
+                        $outputArray['link_extra'] = $headers->links($altlink, 'head');
+                    }
+                }
+                break;
+            default:
+                $outputArray['http_error'] = 404;
+                break;
+        }
+        #Add breadcrumbs
+        $breadarray = (new \Simbiat\http20\HTML)->breadcrumbs(items: $breadarray, links: true, headers: true);
+        $outputArray['breadcrumbs']['bictracker'] = $breadarray['breadcrumbs'];
+        $outputArray['breadcrumbs']['links'] = $breadarray['links'];
+        return $outputArray;
+    }
+    
     #Function to update the BICs data in database
     public function dbUpdate(string $datadir, string $date = 'DDMMYYYY'): bool
     {
@@ -72,7 +164,7 @@ class bicDBF
                 $filename = $datadir.$file.'.dbf';
                 if (file_exists($filename)) {
                     #Convert DBF file to array
-                    $array = (new \ArrayHelpers\ArrayHelpers)->dbfToArray($filename);
+                    $array = (new \Simbiat\ArrayHelpers)->dbfToArray($filename);
                     if (is_array($array) && !empty($array)) {
                         #Normalize data
                         #Iterate rows
@@ -133,7 +225,7 @@ class bicDBF
                 #Deleting the file
                 @unlink($filename);
                 #Running the queries we've accumulated
-                (new \SimbiatDB\Controller)->query($queries);
+                (new \Simbiat\Database\Controller)->query($queries);
             }
             return true;
         } catch(\Exception $e) {
@@ -146,7 +238,7 @@ class bicDBF
     public function getCurrent(string $vkey): array
     {
         #Get general data
-        $bicdetails = (new \SimbiatDB\Controller)->selectRow('SELECT biclist.`VKEY`, `VKEYDEL`, `'.$this->dbprefix.'keybaseb`.`BVKEY`, `'.$this->dbprefix.'keybasef`.`FVKEY`, `ADR`, `AT1`, `AT2`, `CKS`, `DATE_CH`, `DATE_IN`, `DATEDEL`, `DT_IZM`, `IND`, `KSNP`, `NAMEP`, `'.$this->dbprefix.'keybaseb`.`NAMEMAXB`, `'.$this->dbprefix.'keybasef`.`NAMEMAXF`, `NEWKS`, biclist.`NEWNUM`, `'.$this->dbprefix.'co`.`BIC_UF`, `'.$this->dbprefix.'co`.`DT_ST`, `'.$this->dbprefix.'co`.`DT_FIN`, `'.$this->dbprefix.'bik_swif`.`KOD_SWIFT`, `'.$this->dbprefix.'bik_swif`.`NAME_SRUS`, `NNP`, `OKPO`, `PERMFO`, `'.$this->dbprefix.'pzn`.`NAME` AS `PZN`, `'.$this->dbprefix.'real`.`NAME_OGR` AS `REAL`, `'.$this->dbprefix.'rclose`.`NAMECLOSE` AS `R_CLOSE`, `REGN`, `'.$this->dbprefix.'reg`.`NAME` AS `RGN`, `'.$this->dbprefix.'reg`.`CENTER`, `RKC`, `SROK`, `TELEF`, `'.$this->dbprefix.'tnp`.`FULLNAME` AS `TNP`, `'.$this->dbprefix.'uerko`.`UERNAME` AS `UER`, `'.$this->dbprefix.'prim`.`PRIM1`, `'.$this->dbprefix.'prim`.`PRIM2`, `'.$this->dbprefix.'prim`.`PRIM3`, `'.$this->dbprefix.'rayon`.`NAME` AS `RAYON`, `'.$this->dbprefix.'kgur`.`KGUR` FROM `'.$this->dbprefix.'list` biclist
+        $bicdetails = (new \Simbiat\Database\Controller)->selectRow('SELECT biclist.`VKEY`, `VKEYDEL`, `'.$this->dbprefix.'keybaseb`.`BVKEY`, `'.$this->dbprefix.'keybasef`.`FVKEY`, `ADR`, `AT1`, `AT2`, `CKS`, `DATE_CH`, `DATE_IN`, `DATEDEL`, `DT_IZM`, `IND`, `KSNP`, `NAMEP`, `'.$this->dbprefix.'keybaseb`.`NAMEMAXB`, `'.$this->dbprefix.'keybasef`.`NAMEMAXF`, `NEWKS`, biclist.`NEWNUM`, `'.$this->dbprefix.'co`.`BIC_UF`, `'.$this->dbprefix.'co`.`DT_ST`, `'.$this->dbprefix.'co`.`DT_FIN`, `'.$this->dbprefix.'bik_swif`.`KOD_SWIFT`, `'.$this->dbprefix.'bik_swif`.`NAME_SRUS`, `NNP`, `OKPO`, `PERMFO`, `'.$this->dbprefix.'pzn`.`NAME` AS `PZN`, `'.$this->dbprefix.'real`.`NAME_OGR` AS `REAL`, `'.$this->dbprefix.'rclose`.`NAMECLOSE` AS `R_CLOSE`, `REGN`, `'.$this->dbprefix.'reg`.`NAME` AS `RGN`, `'.$this->dbprefix.'reg`.`CENTER`, `RKC`, `SROK`, `TELEF`, `'.$this->dbprefix.'tnp`.`FULLNAME` AS `TNP`, `'.$this->dbprefix.'uerko`.`UERNAME` AS `UER`, `'.$this->dbprefix.'prim`.`PRIM1`, `'.$this->dbprefix.'prim`.`PRIM2`, `'.$this->dbprefix.'prim`.`PRIM3`, `'.$this->dbprefix.'rayon`.`NAME` AS `RAYON`, `'.$this->dbprefix.'kgur`.`KGUR` FROM `'.$this->dbprefix.'list` biclist
                 LEFT JOIN `'.$this->dbprefix.'bik_swif` ON `'.$this->dbprefix.'bik_swif`.`KOD_RUS` = biclist.`NEWNUM`
                 LEFT JOIN `'.$this->dbprefix.'reg` ON `'.$this->dbprefix.'reg`.`RGN` = biclist.`RGN`
                 LEFT JOIN `'.$this->dbprefix.'uerko` ON `'.$this->dbprefix.'uerko`.`UERKO` = biclist.`UER`
@@ -193,16 +285,18 @@ class bicDBF
     #Function to search for BICs
     public function Search(string $what = ''): array
     {
-        return (new \SimbiatDB\Controller)->selectAll('SELECT `VKEY`, `NEWNUM`, `NAMEP`, `DATEDEL` FROM `'.$this->dbprefix.'list` WHERE `VKEY` LIKE :name OR `NEWNUM` LIKE :name OR `NAMEP` LIKE :name OR `KSNP` LIKE :name OR `REGN` LIKE :name ORDER BY `NAMEP` ASC', [':name'=>'%'.$what.'%']);
+        return (new \Simbiat\Database\Controller)->selectAll('SELECT `VKEY`, `NEWNUM`, `NAMEP`, `DATEDEL` FROM `'.$this->dbprefix.'list` WHERE `VKEY` LIKE :name OR `NEWNUM` LIKE :name OR `NAMEP` LIKE :name OR `KSNP` LIKE :name OR `REGN` LIKE :name ORDER BY `NAMEP` ASC', [':name'=>'%'.$what.'%']);
     }
     
     #Function to get basic statistics
     public function Statistics(int $lastchanges = 10): array
     {
-        $temp = (new \SimbiatDB\Controller)->selectAll('SELECT COUNT(*) as \'bics\' FROM `'.$this->dbprefix.'list` WHERE `DATEDEL` IS NULL UNION ALL SELECT COUNT(*) as \'bics\' FROM `'.$this->dbprefix.'list` WHERE `DATEDEL` IS NOT NULL');
+        #Cache Controller
+        $dbcon = (new \Simbiat\Database\Controller);
+        $temp = $dbcon->selectAll('SELECT COUNT(*) as \'bics\' FROM `'.$this->dbprefix.'list` WHERE `DATEDEL` IS NULL UNION ALL SELECT COUNT(*) as \'bics\' FROM `'.$this->dbprefix.'list` WHERE `DATEDEL` IS NOT NULL');
         $statistics['bicactive'] = $temp[0]['bics'];
         $statistics['bicdeleted'] = $temp[1]['bics'];
-        $statistics['bicchanges'] = (new \SimbiatDB\Controller)->selectAll('SELECT * FROM ((SELECT \'changed\' as `type`, `VKEY`, `NAMEP`, `DATEDEL`, `DT_IZM` FROM `'.$this->dbprefix.'list` a WHERE `DATEDEL` IS NULL ORDER BY `DT_IZM` DESC LIMIT '.$lastchanges.') UNION ALL (SELECT \'deleted\' as `type`, `VKEY`, `NAMEP`, `DATEDEL`, `DT_IZM` FROM `'.$this->dbprefix.'list` b WHERE `DATEDEL` IS NOT NULL ORDER BY `DATEDEL` DESC LIMIT '.$lastchanges.')) c');
+        $statistics['bicchanges'] = $dbcon->selectAll('SELECT * FROM ((SELECT \'changed\' as `type`, `VKEY`, `NAMEP`, `DATEDEL`, `DT_IZM` FROM `'.$this->dbprefix.'list` a WHERE `DATEDEL` IS NULL ORDER BY `DT_IZM` DESC LIMIT '.$lastchanges.') UNION ALL (SELECT \'deleted\' as `type`, `VKEY`, `NAMEP`, `DATEDEL`, `DT_IZM` FROM `'.$this->dbprefix.'list` b WHERE `DATEDEL` IS NOT NULL ORDER BY `DATEDEL` DESC LIMIT '.$lastchanges.')) c');
         return $statistics;
     }
     
@@ -214,9 +308,9 @@ class bicDBF
         #Replace prefix
         $sql = str_replace('%dbprefix%', $this->dbprefix, $sql);
         #Split file content into queries
-        $sql = (new \SimbiatDB\Controller)->stringToQueries($sql);
+        $sql = (new \Simbiat\Database\Controller)->stringToQueries($sql);
         try {
-            (new \SimbiatDB\Controller)->query($sql);
+            (new \Simbiat\Database\Controller)->query($sql);
             return true;
         } catch(\Exception $e) {
             echo $e->getTraceAsString();
@@ -228,7 +322,7 @@ class bicDBF
     private function predecessors(string $vkey): array
     {
         #Get initial list
-        $bank = (new \SimbiatDB\Controller)->selectAll('SELECT `VKEY`, `VKEYDEL`, `NAMEP`, `DATEDEL` FROM `'.$this->dbprefix.'list` WHERE `VKEYDEL` = :newnum ORDER BY `NAMEP` ASC', [':newnum'=>$vkey]);
+        $bank = (new \Simbiat\Database\Controller)->selectAll('SELECT `VKEY`, `VKEYDEL`, `NAMEP`, `DATEDEL` FROM `'.$this->dbprefix.'list` WHERE `VKEYDEL` = :newnum ORDER BY `NAMEP` ASC', [':newnum'=>$vkey]);
         if (empty($bank)) {
             $bank = array();
         } else {
@@ -258,7 +352,7 @@ class bicDBF
     private function successors(string $vkey): array
     {
         #Get initial list
-        $bank = (new \SimbiatDB\Controller)->selectAll('SELECT `VKEY`, `VKEYDEL`, `NAMEP`, `DATEDEL` FROM `'.$this->dbprefix.'list` WHERE `VKEY` = :newnum ORDER BY `NAMEP` ASC', [':newnum'=>$vkey]);
+        $bank = (new \Simbiat\Database\Controller)->selectAll('SELECT `VKEY`, `VKEYDEL`, `NAMEP`, `DATEDEL` FROM `'.$this->dbprefix.'list` WHERE `VKEY` = :newnum ORDER BY `NAMEP` ASC', [':newnum'=>$vkey]);
         if (empty($bank)) {
             $bank = [];
         } else {
@@ -276,7 +370,7 @@ class bicDBF
     private function rkcChain(string $bic): array
     {
         #Get initial list
-        $bank = (new \SimbiatDB\Controller)->selectAll('SELECT `VKEY`, `NEWNUM`, `RKC`, `NAMEP`, `DATEDEL` FROM `'.$this->dbprefix.'list` WHERE `NEWNUM` = :newnum AND `DATEDEL` IS NULL LIMIT 1', [':newnum'=>$bic]);
+        $bank = (new \Simbiat\Database\Controller)->selectAll('SELECT `VKEY`, `NEWNUM`, `RKC`, `NAMEP`, `DATEDEL` FROM `'.$this->dbprefix.'list` WHERE `NEWNUM` = :newnum AND `DATEDEL` IS NULL LIMIT 1', [':newnum'=>$bic]);
         if (empty($bank)) {
             $bank = [];
         } else {
@@ -292,12 +386,12 @@ class bicDBF
     private function bicUf(string $bic): array
     {
         #Get initial list
-        $bank = (new \SimbiatDB\Controller)->selectAll('SELECT `VKEY`, `NAMEP`, `DATEDEL`, `'.$this->dbprefix.'co`.`BIC_UF` FROM `'.$this->dbprefix.'list` biclist LEFT JOIN `'.$this->dbprefix.'co` ON `'.$this->dbprefix.'co`.`BIC_CF` = biclist.`NEWNUM` WHERE biclist.`NEWNUM` = :newnum AND biclist.`DATEDEL` IS NULL LIMIT 1', [':newnum'=>$bic]);
+        $bank = (new \Simbiat\Database\Controller)->selectAll('SELECT `VKEY`, `NAMEP`, `DATEDEL`, `'.$this->dbprefix.'co`.`BIC_UF` FROM `'.$this->dbprefix.'list` biclist LEFT JOIN `'.$this->dbprefix.'co` ON `'.$this->dbprefix.'co`.`BIC_CF` = biclist.`NEWNUM` WHERE biclist.`NEWNUM` = :newnum AND biclist.`DATEDEL` IS NULL LIMIT 1', [':newnum'=>$bic]);
         if (empty($bank)) {
             $bank = [];
         } else {
             #Get authorized branch of authorized branch
-            if (!empty($bank[0]['BIC_UF']) && $bank[0]['BIC_UF'] != $bic && $bank[0]['BIC_UF'] != $bank[0]['NEWNUM']) {
+            if (!empty($bank[0]['BIC_UF']) && $bank[0]['BIC_UF'] != $bic && isset($bank[0]['NEWNUM']) && $bank[0]['BIC_UF'] != $bank[0]['NEWNUM']) {
                 $bank = array_merge($bank, $this->bicUf($bank[0]['BIC_UF']));
             }
         }
@@ -307,7 +401,7 @@ class bicDBF
     #Function to get all branches of a bank
     private function filials(string $bic): array
     {
-        $bank = (new \SimbiatDB\Controller)->selectAll('SELECT `'.$this->dbprefix.'list`.`VKEY`, `'.$this->dbprefix.'list`.`NEWNUM`, `'.$this->dbprefix.'list`.`NAMEP`, `'.$this->dbprefix.'list`.`DATEDEL` FROM `'.$this->dbprefix.'co` bicco LEFT JOIN `'.$this->dbprefix.'list` ON `'.$this->dbprefix.'list`.`NEWNUM` = bicco.`BIC_CF` WHERE `BIC_UF` = :newnum ORDER BY `'.$this->dbprefix.'list`.`NAMEP`', [':newnum'=>$bic]);
+        $bank = (new \Simbiat\Database\Controller)->selectAll('SELECT `'.$this->dbprefix.'list`.`VKEY`, `'.$this->dbprefix.'list`.`NEWNUM`, `'.$this->dbprefix.'list`.`NAMEP`, `'.$this->dbprefix.'list`.`DATEDEL` FROM `'.$this->dbprefix.'co` bicco LEFT JOIN `'.$this->dbprefix.'list` ON `'.$this->dbprefix.'list`.`NEWNUM` = bicco.`BIC_CF` WHERE `BIC_UF` = :newnum ORDER BY `'.$this->dbprefix.'list`.`NAMEP`', [':newnum'=>$bic]);
         if (empty($bank)) {
             $bank = [];
         }
